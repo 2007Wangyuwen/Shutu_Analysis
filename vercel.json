@@ -1,3 +1,6 @@
-git add vercel.json
-git commit -m "添加 Vercel SPA 回退规则"
-git push
+{
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "https://shutuanalysis-production.up.railway.app/api/$1" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
