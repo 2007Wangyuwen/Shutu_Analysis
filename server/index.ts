@@ -474,9 +474,8 @@ app.post('/api/sheets/fetch', async (req: Request, res: Response) => {
   }
 });
 
-const port = Number(process.env.PORT || 3001);
+const port = process.env.PORT || 3001;
 app.listen(port, () => {
-  // eslint-disable-next-line no-console
-  console.log(`[server] deepseek proxy listening on http://localhost:${port}`);
+  console.log(`Backend running on port ${port}`);
 });
 
