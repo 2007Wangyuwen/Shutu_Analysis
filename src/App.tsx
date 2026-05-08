@@ -1089,6 +1089,28 @@ ${dataInput}`;
         useCORS: true,
         backgroundColor: '#f5f2ed',
         logging: false,
+        onclone: (clonedDoc) => {
+          const allElements = clonedDoc.querySelectorAll<HTMLElement>('*');
+          allElements.forEach((el) => {
+            const rawStyle = el.getAttribute('style');
+            if (!rawStyle) return;
+            const keptDeclarations = rawStyle
+              .split(';')
+              .map((decl) => decl.trim())
+              .filter((decl) => decl.length > 0 && !/oklch/i.test(decl));
+            if (keptDeclarations.length === 0) {
+              el.removeAttribute('style');
+            } else {
+              el.setAttribute('style', `${keptDeclarations.join('; ')};`);
+            }
+          });
+
+          const styleTags = clonedDoc.querySelectorAll<HTMLStyleElement>('style');
+          styleTags.forEach((styleTag) => {
+            if (!styleTag.textContent) return;
+            styleTag.textContent = styleTag.textContent.replace(/oklch\([^)]*\)/gi, 'transparent');
+          });
+        },
       });
     } finally {
       restore.forEach(({ el, visibility }) => {
