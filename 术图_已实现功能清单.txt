@@ -1,0 +1,221 @@
+================================================================================
+术图（Shutu_Analysis）项目 — 已实现功能详细清单
+文档依据：对项目内全部源代码（src/、server/、scripts/、配置与 package）的通读与交叉核对
+更新说明：覆盖 ECNU 拆流、流式增量解析、内存缓存、图表通俗解读、分析阶段文案、骨架屏等近期实现
+================================================================================
+
+一、产品定位与入口
+--------------------------------------------------------------------------------
+1. 品牌与界面基调
+   - 应用名「术图 Shutu」，定位为学术期刊级（Nature / Science / Cell 风格表述）的数据分析与视觉设计工具。
+   - 启动页（appMode === 'select'）为双模式选择：不直接进入工作区，需先选「数据可视化分析」或「专业图像生成」。
+
+2. 工作区导航与状态重置
+   - 顶部点击 Logo/标题区域可返回模式选择页，并调用 resetWorkspaceState：清空输入、对话、结果、解析结果、上传推断、历史相关编辑状态、加载与分析阶段状态等。
+   - 粘性顶栏：显示当前子模式（数据可视化 / 专业图像生成）、普通/高级模式切换、历史记录入口、API 设置入口。
+
+3. 快速需求模板（App.tsx 内联常量）
+   - 图表模式：CHART_QUICK_TEMPLATES（描述统计、相关性、分组对比、时间序列、异常与分布等），下拉选择后写入「具体需求」并记录 requirementTemplateId。
+   - 图像模式：IMAGE_QUICK_TEMPLATES（写实、极简、概念插画、科技未来感等），同上。
+
+
+二、两大核心业务模式
+--------------------------------------------------------------------------------
+【模式 A：数据可视化分析（chart）】
+   - 用户输入：必填「原始数据」文本区；可选「具体需求」单行说明。
+   - 输出契约（提示词约束）：<self_check>、数据概览（intro）、三套方案（===方案一/二/三===），每套含 Plotly JSON（```json plotly 或 ```plotly）、Python 代码、方案说明；要求 Markdown 理论/百科超链接等。
+   - 前端 parseResult 按首个完整「===方案一===」切 intro 与方案正文；流式时对未写完的分隔符做尾部剥离，避免把半个分隔符拼进 intro。
+
+【模式 B：专业图像生成（image）】
+   - 用户输入：必填「文本描述」；可选「具体需求」。
+   - 模型生成三套方案，每套含 <image_prompt> 英文提示词；前端在分析完成后调用千帆为每套并行生图（默认 1024×1024）。
+
+
+三、AI 管线：ECNU（华东师大）与 DeepSeek 拆分（图表模式 + 可选 ECNU Key）
+--------------------------------------------------------------------------------
+1. 触发条件（App.tsx handleAnalyze）
+   - 当 appMode === 'chart'、非「修改对话」、且用户在 API 设置中填写了 ECNU API Key 时：先走 ECNU，再走 DeepSeek「仅三套方案」。
+   - 否则：单路 DeepSeek（完整 CHART_SYSTEM_INSTRUCTION 或修改场景的 CHART_SCHEMES_ONLY）。
+
+2. ECNU 数据概览（非流式）
+   - 前端 callECNUChatCompletion（src/api/ecnuApi.ts）POST 同源 /api/ecnu/chat，Authorization: Bearer <用户 ECNU Key>。
+   - 服务端 server/index.ts：POST /api/ecnu/chat 将请求体与 Authorization 转发至 https://chat.ecnu.edu.cn/open/api/v1/chat/completions，默认 model ecnu-plus，stream false。
+   - 系统提示 ECNU_CHART_OVERVIEW_SYSTEM：仅输出 <self_check> 与「## 数据概览」，禁止三套方案与代码块。
+   - 返回文本记为 overviewPrefix，再拼接 DeepSeek 流式生成的 schemes 部分，fullResult = overview + "\n\n" + schemesText。
+
+3. DeepSeek 三套方案（流式）
+   - 与 ECNU 拆分时：messages 使用 CHART_SCHEMES_ONLY_INSTRUCTION，user 内容包含「已生成的概览」摘录 + 完整 chart 提示，chartPart: 'schemes-only' 传入会话。
+   - 服务端对 basic 且无用户 Key 时：若 chartPart === 'schemes-only'，使用 buildBasicModeSchemesOnly（仅三套模板，无单独数据概览段），按块伪流式输出。
+
+4. 图表「通俗解读」（ECNU 二次调用，图表模式）
+   - 在方案卡片中渲染出有效 Plotly figure（含用户 JSON 编辑覆盖）后，useEffect 根据 activeCard、activeSchemeFigureKey 触发。
+   - summarizePlotlyFigureForInterpretation（plotly/summarizePlotlyForInterpretation.ts）：从 figure 的 data/layout 提取标题、类型、trace 摘要、热力图/散点等统计描述。
+   - generateChartInterpretation（ecnuApi.ts）：再经 callECNUChatCompletion，系统角色为「数据分析解说员」，用户内容含图表标题、类型、数据摘要；结果按卡片索引缓存 schemeInterpretationByCard，错误记入 schemeInterpretationErrorByCard。
+   - 前端 analysisStatus 在解读进行中为 'interpreting'，顶栏展示友好文案；AbortController 在依赖变化时取消上一次请求。
+
+5. 内置系统提示摘要（仍全部写在 App.tsx）
+   - CHART_SYSTEM_INSTRUCTION：单路全流程时的完整图表顾问提示。
+   - CHART_SCHEMES_ONLY_INSTRUCTION：与 ECNU 概览拆分或「修改三套方案」时使用。
+   - ECNU_CHART_OVERVIEW_SYSTEM：仅概览段。
+   - IMAGE_SYSTEM_INSTRUCTION：图像模式三套 prompt 与结构要求。
+
+6. 修改对话（二次分析）
+   - 用户在已有结果上输入「修改要求」，在对话中追加 user 消息；提示从 ===方案一=== 起输出，不重复大段概览；isModify 为 true 时不走内存缓存、不走 ECNU 概览首段逻辑（willUseEcnuOverview 为 false）。
+
+
+四、普通模式 vs 高级模式（与 DeepSeek 代理联动）
+--------------------------------------------------------------------------------
+1. 前端
+   - 顶栏切换「普通 / 高级」，持久化 localStorage shutu_analysis_mode。
+   - 高级模式且用户填写 DeepSeek Key：请求携带用户 Key；若界面选 deepseek-chat，则 effectiveDeepseekModel 映射为 deepseek-reasoner（与 App 内注释一致）。
+   - 未填 Key：高级模式仍按服务端 basic 分支处理（依赖后端 DEEPSEEK_API_KEY 或走内置模板）。
+
+2. 后端（server/index.ts + server/deepseekProxy.ts）
+   - POST /api/chat/session：保存 sessionId → { apiKey, model, mode, chartPart, messages }，一次性使用。
+   - GET /api/chat?sessionId=：SSE，事件 JSON：type chunk（含 text）/ done / error；会话在处理开始时 delete，防复用。
+   - mode 非 advanced 或无有效用户 Key：不调用 DeepSeek，使用 buildBasicModeResult（full）或 buildBasicModeSchemesOnly（schemes-only）；按约 220 字符切块伪流式发送。
+   - advanced 且有 Key：streamDeepseekChatCompletions 调 DeepSeek 流式 API；Key 优先用户，否则环境变量 DEEPSEEK_API_KEY；可配置 DEEPSEEK_BASE_URL、DEEPSEEK_CHAT_COMPLETIONS_PATH；deepseekProxy 忽略 reasoning_content，仅拼接 delta.content。
+   - POST /api/ai/deepseek/generate：text/plain 分块流，备用。
+   - express.json limit 2mb；CORS *（开发便利）。
+
+3. 前端流式消费（src/api/deepseekGenerate.ts）
+   - 先 POST 创建 session，再 EventSource 订阅 /api/chat；onChunk 累积；done 时 resolve 全文；abort 时 reject；onerror 若有 partial 则 resolve partial。
+
+
+五、流式体验、解析与界面状态（App.tsx 核心）
+--------------------------------------------------------------------------------
+1. 双缓冲文本
+   - result：界面展示用全文。
+   - streamingPartialResult：专供 parseResult 做增量解析；finally 中清空。
+
+2. 增量解析 parseResult（同文件内函数）
+   - 提取 <self_check>（成对则移除；仅开头标签则截断到文尾以防流式污染）。
+   - intro：去掉 self_check 后，以首个完整「===方案一===」为界；若尚未出现完整分隔符，则整段视为 intro，并对缓冲区末尾「可能是未完成的分隔符」的前缀做 stripIncompleteTrailingSchemeMarker（三种方案分隔符共用前缀检测）。
+   - 方案正文：首个分隔符之后按「===方案二===」「===方案三===」split；每段内用闭合围栏正则提取 Plotly JSON（json plotly / plotly）、python、image_prompt；流式未闭合围栏不抛错、不填 plotlyJson。
+   - 注释明确：Markdown 链接 [text](url) 不会被当作代码块剥离。
+
+3. displayParsed（useMemo）
+   - streamingParsedCards = parseResult(streamingPartialResult)。
+   - 加载中且已解析出至少一个方案时优先用 streamingParsedCards，否则用解析完成的 parsedData，用于右侧 intro + 卡片与图表键。
+
+4. analysisStatus：'idle' | 'overview' | 'schemes' | 'interpreting'
+   - 发起分析时：有 ECNU 概览则为 overview，否则 schemes；ECNU 返回后切 schemes；主流程结束 finally 置 idle；图表通俗解读开始时 interpreting，结束用函数式更新避免覆盖新一轮分析状态。
+
+5. 加载 UI
+   - 无方案且加载中：状态文案（getAnalysisStatusCopy）+ 流式 Markdown + 三张 SchemeOptionSkeletonCards（animate-pulse，仿方案卡布局）。
+   - 已有方案仍加载：顶部续写提示条；解读阶段单独一条「正在生成图表通俗解读」提示。
+
+6. 内存缓存（LRU，最多 32 条）
+   - 键：hashAnalysisCacheKey(makeAnalysisCacheKey(appMode, dataInput, requirementInput))，chart/image 与输入组合区分。
+   - 命中则跳过 ECNU/DeepSeek API，直接填充 result 与解析；不写历史重复条目；仍可走图像千帆等后续步骤。
+
+7. Markdown 渲染
+   - 全局 remarkPlugins={[remarkGfm]}；components MarkdownComponents：code 中非 plotly 用语义高亮 + 复制；plotly 语言块返回 null 避免与下方 Plot 重复；a 强制 target="_blank" rel="noopener noreferrer" 且不被 props 覆盖。
+
+
+六、数据导入、解析与本地智能（src/data/）
+--------------------------------------------------------------------------------
+1. CSV（parseCSV.ts）：PapaParse，表头 trim，跳过空行，过滤全空行。
+2. Excel（parseExcel.ts）：xlsx 读首表，sheet_to_json，cellDates true。
+3. 上传与手动编辑（App.tsx）
+   - FileDropZone：拖拽/点击，接受 .csv/.xlsx/.xls，解析后 applyParsedUploadRows：最多 5000 行入库，前 200 行写入「原始数据」文本框（toCsvText）。
+   - 用户直接改「原始数据」textarea：防抖同步 inferSchema / recommendCharts / builderOptions，并短时显示 dataSourceEditNotice（数据已按新内容重算类提示）。
+
+4. inferSchema.ts：列类型 number / category / time；数值清洗（百分号、千分位等）；时间识别与列名启发；高基数 ID 列降权。
+
+5. recommendCharts.ts：按列组合推荐多种 ChartType，附理由与 defaultOptions。
+
+6. toCsvText.ts：CSV 转义与行数上限；builder 标签辅助。
+
+
+七、本地 Plotly 概览图（plotly/plotlyBuilder.ts + ChartBuilderControls）
+--------------------------------------------------------------------------------
+1. 上传并推断成功后，用推荐第一项 defaultOptions 初始化 builderOptions。
+2. ChartBuilderControls：图表类型、标题、按类型选择列（时间/数值/分类）、bar_aggregate 时聚合方式 mean/median/sum/count 等。
+3. buildPlotlyFigure：time_series、bar_aggregate、scatter_xy、histogram、stacked_bar_counts、correlation_heatmap 等。
+4. 展示条件：图表模式、当前卡片展开且为 activeCard、存在 uploadedSchema/builderOptions/overviewFigure 时在卡片内显示 ChartBuilderControls + Plot（与 AI 方案 Plot 并列逻辑由 App 控制）。
+
+
+八、AI 生成图表的展示与编辑
+--------------------------------------------------------------------------------
+1. getPlotlyFigureForCard：editedPlotlyFigures[idx] 优先于 option.plotlyJson。
+2. react-plotly.js：responsive、ModeBar、scrollZoom、editable；layout 合并 margin、uirevision/hovermode 默认值。
+3. PlotlyJsonEditor：JSON 文本框编辑，应用后写入 editedPlotlyFigures。
+4. 方案卡片内 Markdown：对 opt.raw 去掉 ```json plotly 块与 <image_prompt> 再渲染，减少与图表区重复；其它代码块 SyntaxHighlighter。
+
+
+九、图像生成链路（src/api/imageGenerate.ts + server/qianfanImage.ts）
+--------------------------------------------------------------------------------
+1. 前端 POST /api/images/generate。
+2. 后端 OAuth + 千帆 images/generations，模型 qwen-image；环境变量 QIANFAN_API_KEY、QIANFAN_SECRET_KEY。
+3. 失败时 setError 提示部分失败。
+
+
+十、导出与历史
+--------------------------------------------------------------------------------
+1. 导出 Markdown：parsedData.intro + 各 option.raw 拼接下载 .md（加载中非导出按钮隐藏）。
+2. 导出长图：html2canvas 截取 analysisPanelRef，scale 2。
+3. 下载生成图像：按方案索引命名术图_视觉方案_N.jpg。
+4. 历史：首次完整分析成功写入 localStorage shutu_history，最多 20 条；缓存命中不写新历史。
+5. 加载历史：恢复模式、输入、result、conversation、parseResult；清空上传推断（clearUploadedData）；避免概览图与纯文本数据不一致。
+
+
+十一、API 设置（ApiSettingsModal.tsx）
+--------------------------------------------------------------------------------
+1. ECNU Key（密码框）：说明用于图表数据概览；保存 shutu_ecnu_api_key。
+2. DeepSeek Key（密码框）：保存 shutu_deepseek_api_key；模型下拉 deepseek-chat / deepseek-reasoner；保存 shutu_deepseek_model。
+3. 与 App 内 saveApiSettings、初始从 localStorage 恢复一致。
+
+
+十二、UI/UX 与样式
+--------------------------------------------------------------------------------
+1. Tailwind v4 + @tailwindcss/typography；premium-* 组件类；index.css 滚动条、字体字号类。
+2. framer-motion 依赖；入口与工作区 animate-in 类。
+3. 历史抽屉、错误与上传错误展示、加载与空状态图标（lucide-react）。
+
+
+十三、开发与构建
+--------------------------------------------------------------------------------
+1. package.json：dev = node scripts/devWithServer.mjs 并行 npm run dev:vite（端口 3000 host 0.0.0.0）与 npm run dev:server（tsx watch server/index.ts）；build = vite build；lint = tsc --noEmit。
+2. vite.config.ts：代理 /api 到 VITE_PROXY_TARGET 或 localhost:3001；define GEMINI_API_KEY；路径别名 @；HMR 可由 DISABLE_HMR 关闭。
+3. 服务端默认端口 3001（环境变量 PORT）。
+
+
+十四、依赖与代码中未使用的部分（维护参考）
+--------------------------------------------------------------------------------
+1. @google/genai / GEMINI_API_KEY：vite define 存在，src 内无业务引用。
+2. better-sqlite3：package.json 声明，server 与 src 均未使用。
+3. openai：package.json 声明，代码中无 import。
+4. App.tsx 中 showSelfCheck 状态已声明，无任何 JSX 绑定；parsedData.selfCheck 可被解析但无单独折叠展示 UI。
+5. metadata.json：若存在为项目元数据，不参与运行时功能。
+
+
+十五、安全与隐私（实现层面）
+--------------------------------------------------------------------------------
+1. DeepSeek / ECNU Key：存浏览器 localStorage；请求经同源 /api 由后端转发。
+2. 千帆密钥仅服务端环境变量。
+3. chat session 一次性；ECNU 路由转发用户 Bearer。
+
+
+十六、功能总览速查表
+--------------------------------------------------------------------------------
+[入口] 双模式选择 | Logo 回首页并重置
+[需求] 图表/图像快速模板下拉 | 具体需求 + 出版参数（字体/配色/DPI/宽高）并入提示
+[数据] 粘贴或上传 CSV/Excel | 拖拽 FileDropZone | 5000 行计算 / 200 行入模 | 手改数据防抖重算 + 提示
+[推断] schema | 图表推荐 | 本地概览 Plotly | ChartBuilderControls
+[AI·单路] DeepSeek SSE | 普通模板或真流式 | 高级+Key→reasoner 映射 | 修改三套方案
+[AI·拆路] ECNU 概览（可选 Key）+ DeepSeek 仅三套 | 服务端 ECNU 转发
+[解读] ECNU 图表通俗解读 | Plotly 摘要 | 按卡缓存/错误
+[流式] 增量 parseResult | intro/方案一切分 | 骨架屏 | analysisStatus 文案
+[缓存] 内存 LRU 32 | 按 chart/image + 输入哈希 | 命中跳过 LLM
+[图表] 三套 Plotly | JSON 编辑器 | Python 高亮 | plotly 块正文隐藏
+[图像] 三套 prompt | 千帆并行出图 | 单张下载
+[Markdown] remark-gfm | 外链新窗口 | 链接非代码块误剥
+[导出] MD | 长图 PNG
+[历史] 20 条 localStorage | 加载恢复 | 缓存不写重复条
+[设置] DeepSeek + ECNU + 模型持久化
+
+
+================================================================================
+文档结束
+================================================================================
