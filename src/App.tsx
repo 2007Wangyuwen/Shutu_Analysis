@@ -1086,29 +1086,26 @@ ${dataInput}`;
     try {
       return await html2canvas(root, {
         scale: 2,
-        useCORS: true,
         backgroundColor: '#f5f2ed',
-        logging: false,
         onclone: (clonedDoc) => {
-          const allElements = clonedDoc.querySelectorAll<HTMLElement>('*');
-          allElements.forEach((el) => {
-            const rawStyle = el.getAttribute('style');
-            if (!rawStyle) return;
-            const keptDeclarations = rawStyle
-              .split(';')
-              .map((decl) => decl.trim())
-              .filter((decl) => decl.length > 0 && !/oklch/i.test(decl));
-            if (keptDeclarations.length === 0) {
-              el.removeAttribute('style');
-            } else {
-              el.setAttribute('style', `${keptDeclarations.join('; ')};`);
+          // 1. 清除所有内联 style 中的 oklch / oklab
+          clonedDoc.querySelectorAll('*').forEach((el) => {
+            const s = el.getAttribute('style');
+            if (s) {
+              el.setAttribute(
+                'style',
+                s
+                  .replace(/oklch\([^)]*\)/gi, 'transparent')
+                  .replace(/oklab\([^)]*\)/gi, 'transparent')
+              );
             }
           });
 
-          const styleTags = clonedDoc.querySelectorAll<HTMLStyleElement>('style');
-          styleTags.forEach((styleTag) => {
-            if (!styleTag.textContent) return;
-            styleTag.textContent = styleTag.textContent.replace(/oklch\([^)]*\)/gi, 'transparent');
+          // 2. 清除所有 <style> 标签内的 oklch / oklab
+          clonedDoc.querySelectorAll('style').forEach((st) => {
+            st.innerHTML = st.innerHTML
+              .replace(/oklch\([^)]*\)/gi, 'transparent')
+              .replace(/oklab\([^)]*\)/gi, 'transparent');
           });
         },
       });
